@@ -1,422 +1,469 @@
-# 📍 LocationManager
+<p align="center">
+  <h1 align="center">📍 LocationManager</h1>
+  <p align="center">
+    <strong>A modern, production-ready, thread-safe CoreLocation manager for iOS & macOS.</strong>
+  </p>
+  <p align="center">
+    <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.7%20%7C%206.0-orange.svg?style=flat-square" alt="Swift 5.7+ | 6.0" /></a>
+    <a href="https://developer.apple.com"><img src="https://img.shields.io/badge/Platforms-iOS%2014.0%2B%20%7C%20macOS%2011.0%2B-blue.svg?style=flat-square" alt="iOS 14.0+ | macOS 11.0+" /></a>
+    <a href="https://swift.org/package-manager/"><img src="https://img.shields.io/badge/SPM-compatible-brightgreen.svg?style=flat-square" alt="Swift Package Manager" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat-square" alt="MIT License" /></a>
+    <a href="#"><img src="https://img.shields.io/badge/Swift%206-Strict%20Concurrency-success.svg?style=flat-square" alt="Swift 6 Strict Concurrency" /></a>
+  </p>
+</p>
 
-A comprehensive, production-ready **singleton** for all CoreLocation tasks in iOS apps. Drop in one file and get permissions, location fetching, geocoding, region monitoring, heading, distance utilities, and full Combine/async-await support — with zero third-party dependencies.
+---
+
+## Overview
+
+Working directly with Apple's `CLLocationManager` often requires writing extensive delegate boilerplate, managing race conditions, handling iOS 14+ approximate location permissions, and wrapping legacy callbacks into async/await.
+
+**LocationManager** solves this with a clean, unified, thread-safe API:
+
+- 🚀 **Swift Concurrency First**: Native `async`/`await`, `AsyncStream`s, and `@MainActor` isolation with zero data races.
+- ⚡ **Combine & Delegate Support**: Full reactive Combine publishers (`AnyPublisher`, `@Published`) alongside a traditional delegate protocol.
+- 🛡️ **Robust Request Engine**: Safely multiplexes concurrent one-shot requests and continuous tracking without violating Core Location's single-flight contracts.
+- 🎯 **iOS 14+ Precision Awareness**: Built-in support for Full vs. Reduced (Approximate) Accuracy and temporary accuracy upgrades.
+- 🧭 **Complete Sensor & Location Suite**: Continuous updates, geofencing/region monitoring, reverse & forward geocoding, compass heading, and visit monitoring.
+- 🪶 **Zero Dependencies**: Pure Swift built entirely on native Apple frameworks (`CoreLocation`, `MapKit`, `Combine`, `Foundation`).
+
+---
+
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+  - [Swift Package Manager](#swift-package-manager-recommended)
+  - [Manual Installation](#manual-installation)
+- [Configuration (Info.plist)](#configuration-infoplist)
+- [Quick Start](#quick-start)
+- [Key Features & Usage](#key-features--usage)
+  - [1. Permissions & Upgrades](#1-permissions--upgrades)
+  - [2. Approximate Location & Temporary Precision (iOS 14+)](#2-approximate-location--temporary-precision-ios-14)
+  - [3. One-Shot Location Fetching](#3-one-shot-location-fetching)
+  - [4. Streaming Updates (AsyncStream & Combine)](#4-streaming-updates-asyncstream--combine)
+  - [5. Reverse & Forward Geocoding](#5-reverse--forward-geocoding)
+  - [6. Geofencing & Region Monitoring](#6-geofencing--region-monitoring)
+  - [7. Compass Heading & Visits (iOS)](#7-compass-heading--visits-ios)
+  - [8. Distance & Bearing Calculations](#8-distance--bearing-calculations)
+  - [9. Delegate Protocol](#9-delegate-protocol)
+- [Error Handling](#error-handling)
+- [Running Tests](#running-tests)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
 ## Requirements
 
-| | Minimum |
+| Platform / Tool | Minimum Version |
 |---|---|
-| iOS | 14.0+ |
-| Swift | 5.5+ |
-| Xcode | 13+ |
-| Frameworks | CoreLocation, Combine (UIKit on iOS only) |
-
-### Platform Notes
-
-This file compiles on both iOS and macOS, but a few APIs are wrapped in `#if os(iOS)` because they have no macOS equivalent:
-
-| API | Why iOS-only |
-|---|---|
-| `openAppSettings()` | Uses `UIApplication`; no Settings deep-link exists on macOS |
-| `enableBackgroundLocationUpdates()` / `disableBackgroundLocationUpdates()` | `allowsBackgroundLocationUpdates` / `showsBackgroundLocationIndicator` don't exist on macOS |
-| `isHeadingAvailable`, `startUpdatingHeading()`, `stopUpdatingHeading()` | Macs have no magnetometer/compass |
-| `startMonitoringVisits()` / `stopMonitoringVisits()` | Visit monitoring is iOS-only |
-
-Everything else (authorization requests, one-shot/continuous location, geocoding, region monitoring, distance/bearing utilities) works on both platforms.
+| **iOS** | 14.0+ |
+| **macOS** | 11.0+ |
+| **Swift** | 5.7+ (Swift 6 Strict Concurrency Ready) |
+| **Xcode** | 14.0+ |
 
 ---
 
 ## Installation
 
-1. Copy `LocationManager.swift` into your Xcode project.
-2. Add the required keys to your `Info.plist`:
+### Swift Package Manager (Recommended)
 
-```xml
-<!-- Required for When In Use -->
-<key>NSLocationWhenInUseUsageDescription</key>
-<string>We use your location to show nearby content.</string>
+#### In Xcode:
+1. Open your project in Xcode.
+2. Navigate to **File → Add Package Dependencies...**
+3. Paste the repository URL:
+   ```
+   https://github.com/bhargavkukadiya/LocationManager.git
+   ```
+4. Select the **Branch** rule and enter `main` (or select a version tag once published), then click **Add Package**.
 
-<!-- Required if you request Always access -->
-<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-<string>We use your location in the background to provide timely updates.</string>
+#### In `Package.swift`:
+```swift
+dependencies: [
+    .package(url: "https://github.com/bhargavkukadiya/LocationManager.git", branch: "main")
+]
 ```
 
-3. If using background location updates, enable **Location updates** under  
-   *Target → Signing & Capabilities → Background Modes*.
+### Manual Installation
+Copy `Sources/LocationManager/LocationManager.swift` directly into your Xcode project.
+
+---
+
+## Configuration (`Info.plist`)
+
+Add the appropriate location description keys to your application's `Info.plist`:
+
+```xml
+<!-- Required: Foreground location access -->
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>We use your location to show nearby places and provide directions.</string>
+
+<!-- Required: Background & Always location access -->
+<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+<string>We use your location in the background for geofencing alerts.</string>
+
+<!-- Optional: Temporary Full Accuracy (iOS 14+) -->
+<key>NSLocationTemporaryUsageDescriptionDictionary</key>
+<dict>
+    <key>NavigationPurposeKey</key>
+    <string>We need high-precision GPS coordinates for turn-by-turn navigation.</string>
+</dict>
+```
+
+> **Note**: For background updates on iOS, enable **Location updates** under *Signing & Capabilities → Background Modes*.
 
 ---
 
 ## Quick Start
 
 ```swift
-// 1. Request permission
-LocationManager.shared.requestWhenInUseAuthorization()
+import LocationManager
 
-// 2. Get current location
-Task {
+Task { @MainActor in
+    // 1. Request permission
+    let status = await LocationManager.shared.requestWhenInUseAuthorizationAsync()
+    guard status.isAuthorized else {
+        print("Location permission denied: \(status.description)")
+        return
+    }
+
+    // 2. Fetch current location once
     do {
         let location = try await LocationManager.shared.getCurrentLocation()
-        print("Lat: \(location.coordinate.latitude)")
+        print("Current Coordinates: \(location.coordinate.latitude), \(location.coordinate.longitude)")
     } catch {
-        print(error.localizedDescription)
+        print("Fetch failed: \(error.localizedDescription)")
+    }
+
+    // 3. Stream continuous updates
+    LocationManager.shared.startUpdatingLocation()
+    for await location in LocationManager.shared.locations {
+        print("Live Location: \(location.coordinate.latitude), \(location.coordinate.longitude)")
     }
 }
 ```
 
 ---
 
-## Features at a Glance
+## Key Features & Usage
 
-| Category | Feature |
-|---|---|
-| **Authorization** | WhenInUse / Always requests, async variants, open Settings |
-| **Location** | One-shot fetch, continuous updates, significant changes, background |
-| **Geocoding** | Reverse (coords → address), Forward (address → coords) |
-| **Region Monitoring** | Add/remove circular regions, enter/exit callbacks |
-| **Heading** | Compass heading start/stop |
-| **Visit Monitoring** | Arrival/departure detection |
-| **Distance & Bearing** | Distance between coordinates, bearing in degrees, geofence check |
-| **Validation** | Coordinate validity, accuracy threshold, recency check |
-| **Reactive** | Combine publishers for location & errors, `@Published` auth status |
-
----
-
-## API Reference
-
-### Authorization
+### 1. Permissions & Upgrades
 
 ```swift
-// Callback-based
-LocationManager.shared.requestWhenInUseAuthorization { status in
-    print(status.description) // "Authorized When In Use"
-}
+// Check current permission state
+let isAuthorized = LocationManager.shared.isAuthorized
+let currentStatus = LocationManager.shared.currentAuthorizationStatus
 
-// Async/await
+// Async permission requests
 let status = await LocationManager.shared.requestWhenInUseAuthorizationAsync()
+let alwaysStatus = await LocationManager.shared.requestAlwaysAuthorizationAsync()
 
-// Always permission (must have WhenInUse first)
-LocationManager.shared.requestAlwaysAuthorization()
-
-// Check current state without prompting
-let isOk = LocationManager.shared.isAuthorized
-let current = LocationManager.shared.currentAuthorizationStatus
-
-// Deep-link to Settings if denied
+// Deep link to App Settings if permission is denied
+#if os(iOS)
 LocationManager.shared.openAppSettings()
+#endif
 ```
 
-#### Checking if a permission update/upgrade is required
-
-Before gating a feature behind location access, check what — if anything — needs to happen. This distinguishes "never asked yet" from "granted but needs upgrading to Always" from "blocked in Settings":
+#### Smart Authorization Resolver
+Check what permission level is needed before gating a feature:
 
 ```swift
 let check = LocationManager.shared.authorizationUpdateNeeded(for: .always)
 
 switch check {
 case .satisfied:
-    print("Good to go")
+    print("Ready to start background feature")
 case .needsInitialRequest(let level):
-    print("Need to request \(level) for the first time")
+    print("Requesting \(level) for the first time")
 case .needsUpgradeToAlways:
-    print("Have WhenInUse, need to upgrade to Always")
+    print("Upgrading from WhenInUse to Always")
 case .blocked(let status):
-    print("Blocked: \(status.description) — direct to Settings")
+    print("Blocked by user in Settings (\(status.description))")
 }
 ```
-
-Or let it resolve automatically (requests the right permission for you, and only reports back for the cases you must handle in UI, like `.blocked`):
-
-```swift
-LocationManager.shared.resolveAuthorizationUpdateIfNeeded(for: .always) { result in
-    switch result {
-    case .satisfied:
-        // proceed with background feature
-        break
-    case .blocked:
-        // show an alert with a button to LocationManager.shared.openAppSettings()
-        break
-    default:
-        break
-    }
-}
-```
-
-| Requirement | Use when |
-|---|---|
-| `.whenInUse` | Feature only needs foreground location |
-| `.always` | Feature needs background access (geofencing, background tracking) |
 
 ---
 
-### Fetching Location
+### 2. Approximate Location & Temporary Precision (iOS 14+)
 
-#### One-shot fetch
+In iOS 14+, users can grant "Reduced Accuracy" (approximate location):
 
 ```swift
-// Callback
-LocationManager.shared.getCurrentLocation(accuracy: kCLLocationAccuracyHundredMeters, timeout: 10) { result in
+// Check if app has full precision
+let accuracy = LocationManager.shared.currentAccuracyAuthorization // .fullAccuracy or .reducedAccuracy
+
+// Request temporary full accuracy for a specific task
+if accuracy == .reducedAccuracy {
+    let upgraded = await LocationManager.shared.requestTemporaryFullAccuracyAuthorizationAsync(
+        purposeKey: "NavigationPurposeKey"
+    )
+    print("Upgraded precision: \(upgraded.description)")
+}
+```
+
+---
+
+### 3. One-Shot Location Fetching
+
+`getCurrentLocation()` supports per-request accuracy targets, timeouts, and automatic Swift `Task` cancellation:
+
+```swift
+// Async/Await with Task cancellation
+do {
+    let location = try await LocationManager.shared.getCurrentLocation(
+        accuracy: kCLLocationAccuracyNearestTenMeters,
+        timeout: 10
+    )
+    print("Found location: \(location.coordinate)")
+} catch is CancellationError {
+    print("Fetch request was cancelled")
+} catch {
+    print("Error: \(error.localizedDescription)")
+}
+
+// Callback-based with explicit request cancellation
+let requestID = LocationManager.shared.getCurrentLocation(
+    accuracy: kCLLocationAccuracyHundredMeters,
+    timeout: 15
+) { result in
     switch result {
     case .success(let location):
-        print(location.coordinate)
+        print("Received: \(location.coordinate)")
     case .failure(let error):
-        print(error.localizedDescription)
-    }
-}
-
-// Async/await
-let location = try await LocationManager.shared.getCurrentLocation()
-```
-
-#### Continuous updates
-
-```swift
-LocationManager.shared.startUpdatingLocation()  // start
-LocationManager.shared.stopUpdatingLocation()   // stop
-
-// Lower-power significant-change monitoring
-LocationManager.shared.startMonitoringSignificantLocationChanges()
-LocationManager.shared.stopMonitoringSignificantLocationChanges()
-```
-
-#### Background updates
-
-```swift
-LocationManager.shared.enableBackgroundLocationUpdates()   // shows blue bar
-LocationManager.shared.disableBackgroundLocationUpdates()
-```
-
----
-
-### Generating a Location
-
-Useful for testing, mapping, or constructing custom locations:
-
-```swift
-// Simple
-let london = LocationManager.shared.generateLocation(latitude: 51.5074, longitude: -0.1278)
-
-// With full metadata
-let precise = LocationManager.shared.generateLocation(
-    latitude: 51.5074,
-    longitude: -0.1278,
-    altitude: 15,
-    horizontalAccuracy: 5,
-    speed: 1.4,
-    timestamp: Date()
-)
-```
-
----
-
-### Geocoding
-
-```swift
-// Reverse geocode: coordinates → address
-let info = try await LocationManager.shared.reverseGeocode(location: location)
-print(info.formattedAddress) // "221B Baker Street, London, ENG, NW1 6XE, United Kingdom"
-print(info.locality)         // "London"
-print(info.country)          // "United Kingdom"
-
-// Forward geocode: address → coordinates
-let results = try await LocationManager.shared.forwardGeocode(address: "1 Infinite Loop, Cupertino")
-if let first = results.first {
-    print(first.coordinate) // CLLocationCoordinate2D
-}
-```
-
----
-
-### Distance & Bearing
-
-```swift
-let sf = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
-let la = CLLocationCoordinate2D(latitude: 34.0522, longitude: -118.2437)
-
-// Distance in meters
-let meters = LocationManager.shared.distance(from: sf, to: la)
-print("\(meters / 1000) km") // ~559 km
-
-// Bearing in degrees (0–360)
-let degrees = LocationManager.shared.bearing(from: sf, to: la)
-print("\(degrees)°") // ~135°
-
-// Distance from last known location
-let dist = LocationManager.shared.distanceFromCurrentLocation(to: la)
-
-// Geofence point check
-let inside = LocationManager.shared.isCoordinate(la, within: 600_000, of: sf) // true
-```
-
----
-
-### Region Monitoring
-
-```swift
-// Start monitoring a 200m radius around a coordinate
-LocationManager.shared.startMonitoringRegion(
-    center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
-    radius: 200,
-    identifier: "office"
-)
-
-// Stop specific region
-LocationManager.shared.stopMonitoringRegion(identifier: "office")
-
-// Stop all
-LocationManager.shared.stopMonitoringAllRegions()
-
-// Query all active regions
-let regions = LocationManager.shared.monitoredRegions
-```
-
-Entry/exit events are delivered via the delegate (see Delegate section below).
-
----
-
-### Heading (Compass)
-
-```swift
-guard LocationManager.shared.isHeadingAvailable else { return }
-
-LocationManager.shared.startUpdatingHeading()
-LocationManager.shared.stopUpdatingHeading()
-```
-
----
-
-### Visit Monitoring
-
-```swift
-// Requires Always authorization
-LocationManager.shared.startMonitoringVisits()
-LocationManager.shared.stopMonitoringVisits()
-```
-
----
-
-### Validation Utilities
-
-```swift
-let coord = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
-
-LocationManager.shared.isValidCoordinate(coord)          // true / false
-LocationManager.shared.isAccurateEnough(location, threshold: 30)  // within 30m accuracy
-LocationManager.shared.isRecent(location, maxAge: 60)    // timestamp within 60 seconds
-```
-
----
-
-## Receiving Updates
-
-### Delegate
-
-Conform to `LocationManagerDelegate` and assign `LocationManager.shared.delegate = self`.  
-All methods have default no-op implementations — implement only what you need.
-
-```swift
-extension MyViewController: LocationManagerDelegate {
-
-    func locationManager(_ manager: LocationManager, didUpdateLocation location: CLLocation) {
-        print("New location: \(location.coordinate)")
-    }
-
-    func locationManager(_ manager: LocationManager, didFailWithError error: LocationError) {
         print("Error: \(error.localizedDescription)")
     }
+}
 
-    func locationManager(_ manager: LocationManager, didChangeAuthorizationStatus status: LocationAuthorizationStatus) {
-        print("Auth changed: \(status.description)")
-    }
-
-    func locationManager(_ manager: LocationManager, didEnterRegion region: CLRegion) {
-        print("Entered: \(region.identifier)")
-    }
-
-    func locationManager(_ manager: LocationManager, didExitRegion region: CLRegion) {
-        print("Exited: \(region.identifier)")
-    }
+// Cancel manually if needed
+if let requestID {
+    LocationManager.shared.cancelLocationRequest(id: requestID)
 }
 ```
 
 ---
 
-### Combine Publishers
+### 4. Streaming Updates (AsyncStream & Combine)
 
+#### Swift Concurrency `AsyncStream`
+Streams use bounded buffers to prevent memory accumulation (`locations` & `headings` buffer the 1 newest item; `visits` buffers the 10 newest items):
+
+```swift
+// Stream locations
+LocationManager.shared.startUpdatingLocation()
+Task {
+    for await location in LocationManager.shared.locations {
+        print("Location: \(location.coordinate.latitude), \(location.coordinate.longitude)")
+    }
+}
+```
+
+#### Combine Publishers
 ```swift
 import Combine
 
 var cancellables = Set<AnyCancellable>()
 
-// Location stream
 LocationManager.shared.locationPublisher
-    .receive(on: DispatchQueue.main)
     .sink { location in
         print("Location: \(location.coordinate)")
     }
     .store(in: &cancellables)
 
-// Error stream
-LocationManager.shared.errorPublisher
-    .sink { error in
-        print("Error: \(error.localizedDescription)")
-    }
-    .store(in: &cancellables)
-
-// Observe authorization status changes
 LocationManager.shared.$authorizationStatus
     .sink { status in
-        print("Auth: \(status.description)")
+        print("Auth changed: \(status.description)")
     }
     .store(in: &cancellables)
-
-// Start updates
-LocationManager.shared.startUpdatingLocation()
 ```
 
 ---
 
-## Configuration
+### 5. Reverse & Forward Geocoding
+
+Geocoding requests use isolated per-call instances to prevent collision errors:
 
 ```swift
-let lm = LocationManager.shared
+// Reverse Geocoding (Coordinates → Address)
+let info = try await LocationManager.shared.reverseGeocode(location: location)
+print(info.formattedAddress)
+// "221B Baker Street, London, Greater London, NW1 6XE, United Kingdom"
+print(info.locality)         // "London"
+print(info.country)          // "United Kingdom"
 
-lm.desiredAccuracy    = kCLLocationAccuracyBest        // default
-lm.distanceFilter     = 10                             // meters before next update
-lm.pausesAutomatically = false                         // prevent auto-pause
+// Forward Geocoding (Address String → Coordinates)
+let placemarks = try await LocationManager.shared.forwardGeocode(address: "1 Apple Park Way, Cupertino, CA")
+if let first = placemarks.first {
+    print("Coordinates: \(first.coordinate.latitude), \(first.coordinate.longitude)")
+}
+```
+
+---
+
+### 6. Geofencing & Region Monitoring
+
+```swift
+let officeCenter = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
+
+// Start monitoring a 200m radius
+LocationManager.shared.startMonitoringRegion(
+    center: officeCenter,
+    radius: 200,
+    identifier: "office_geofence"
+)
+
+// Request immediate state check (.inside / .outside)
+LocationManager.shared.requestRegionState(identifier: "office_geofence")
+
+// Stop monitoring
+LocationManager.shared.stopMonitoringRegion(identifier: "office_geofence")
+LocationManager.shared.stopMonitoringAllRegions()
+```
+
+---
+
+### 7. Compass Heading & Visits (iOS)
+
+```swift
+#if os(iOS)
+// Compass Heading
+if LocationManager.shared.isHeadingAvailable {
+    LocationManager.shared.startUpdatingHeading()
+    Task {
+        for await heading in LocationManager.shared.headings {
+            print("Magnetic Heading: \(heading.magneticHeading)°, True: \(heading.trueHeading)°")
+        }
+    }
+}
+
+// Visit Tracking (Arrival / Departure)
+LocationManager.shared.startMonitoringVisits()
+Task {
+    for await visit in LocationManager.shared.visits {
+        print("Visited: \(visit.coordinate) from \(visit.arrivalDate) to \(visit.departureDate)")
+    }
+}
+#endif
+```
+
+---
+
+### 8. Distance & Bearing Calculations
+
+```swift
+let sf = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
+let la = CLLocationCoordinate2D(latitude: 34.0522, longitude: -118.2437)
+
+// Great-circle distance (meters)
+let distanceMeters = LocationManager.shared.distance(from: sf, to: la)
+print("\(distanceMeters / 1000) km") // ~559 km
+
+// Initial bearing (0–360°)
+let bearing = LocationManager.shared.bearing(from: sf, to: la)
+print("\(bearing)°") // ~137°
+
+// Distance from device's last known location
+if let dist = LocationManager.shared.distanceFromCurrentLocation(to: la) {
+    print("Distance to LA: \(dist / 1000) km")
+}
+
+// Point-in-radius geofence check
+let isNearby = LocationManager.shared.isCoordinate(la, within: 600_000, of: sf) // true
+```
+
+---
+
+### 9. Delegate Protocol
+
+For UIKit or AppKit architectures, adopt `@MainActor LocationManagerDelegate`:
+
+```swift
+@MainActor
+final class LocationTracker: LocationManagerDelegate {
+
+    init() {
+        LocationManager.shared.delegate = self
+    }
+
+    func locationManager(_ manager: LocationManager, didUpdateLocation location: CLLocation) {
+        print("Updated location: \(location.coordinate)")
+    }
+
+    func locationManager(_ manager: LocationManager, didFailWithError error: LocationError) {
+        print("Location error: \(error.localizedDescription)")
+    }
+
+    func locationManager(_ manager: LocationManager, didChangeAuthorizationStatus status: LocationAuthorizationStatus) {
+        print("Authorization changed: \(status.description)")
+    }
+
+    func locationManager(_ manager: LocationManager, didEnterRegion region: CLRegion) {
+        print("Entered geofence: \(region.identifier)")
+    }
+
+    func locationManager(_ manager: LocationManager, didExitRegion region: CLRegion) {
+        print("Exited geofence: \(region.identifier)")
+    }
+
+    func locationManager(_ manager: LocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+        print("Geofence state: \(state == .inside ? "Inside" : "Outside")")
+    }
+
+    #if os(iOS)
+    func locationManager(_ manager: LocationManager, didUpdateHeading heading: CLHeading) {
+        print("Heading: \(heading.trueHeading)°")
+    }
+
+    func locationManager(_ manager: LocationManager, didVisit visit: CLVisit) {
+        print("Visit event: \(visit)")
+    }
+    #endif
+}
 ```
 
 ---
 
 ## Error Handling
 
-All errors are surfaced as `LocationError`, which conforms to `LocalizedError`:
+All errors conform to `LocalizedError`, `Sendable`, and `Equatable`:
 
 | Case | Meaning |
 |---|---|
-| `.notAuthorized(status)` | Permission not granted |
-| `.locationServicesDisabled` | System-level location off |
-| `.locationUnavailable` | Could not determine location |
-| `.geocodingFailed(error)` | Geocoder returned an error |
-| `.timeout` | One-shot fetch exceeded time limit |
-| `.regionMonitoringUnavailable` | Device doesn't support region monitoring |
-| `.unknownError(error)` | Unexpected CoreLocation error |
+| `.notAuthorized(status)` | Location permission was denied or restricted |
+| `.locationServicesDisabled` | Device-wide location services are disabled |
+| `.locationUnavailable` | Hardware could not determine current coordinates |
+| `.geocodingFailed(message)` | Reverse or forward geocoding failed |
+| `.timeout` | One-shot location request timed out |
+| `.cancelled` | Location request was explicitly cancelled |
+| `.regionMonitoringUnavailable` | Region monitoring is not supported on this device |
+| `.regionMonitoringFailed(message)` | Geofence registration failed |
+| `.headingFailure(message)` | Magnetometer heading failed |
+| `.unknownError(message)` | Underlying Core Location system error |
 
 ---
 
-## Supporting Types
+## Running Tests
 
-### `LocationAuthorizationStatus`
+Execute the automated test suite from the command line:
 
-Wraps `CLAuthorizationStatus` with a convenient `.isAuthorized` bool and `.description` string.
+```bash
+swift test
+```
 
-### `PlacemarkInfo`
+---
 
-Decoded result from geocoding with properties: `name`, `thoroughfare`, `locality`, `administrativeArea`, `postalCode`, `country`, `isoCountryCode`, `coordinate`, and `formattedAddress`.
+## Contributing
+
+Contributions, issues, and feature requests are welcome!
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ---
 
 ## License
 
-MIT — use freely in personal and commercial projects.
+Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more information.
