@@ -76,12 +76,12 @@ Working directly with Apple's `CLLocationManager` often requires writing extensi
    ```
    https://github.com/bhargavkukadiya/LocationManager.git
    ```
-4. Set the **Dependency Rule** to **Up to Next Major Version** with `1.0.0`, then click **Add Package**.
+4. Set the **Dependency Rule** to **Up to Next Major Version** with `1.0.1`, then click **Add Package**.
 
 #### In `Package.swift`:
 ```swift
 dependencies: [
-    .package(url: "https://github.com/bhargavkukadiya/LocationManager.git", from: "1.0.0")
+    .package(url: "https://github.com/bhargavkukadiya/LocationManager.git", from: "1.0.1")
 ]
 ```
 
