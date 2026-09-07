@@ -165,6 +165,8 @@ LocationManager.shared.openAppSettings()
 #endif
 ```
 
+Always requests return the current status after 30 seconds if no response arrives (including requests ignored after Allow Once). Later permission changes still reach the authorization publisher and delegate. Upgrade tracking resets when authorization returns to Not Determined.
+
 #### Smart Authorization Resolver
 Check what permission level is needed before gating a feature:
 
@@ -206,7 +208,7 @@ if accuracy == .reducedAccuracy {
 
 ### 3. One-Shot Location Fetching
 
-`getCurrentLocation()` supports per-request accuracy targets, timeouts, and automatic Swift `Task` cancellation:
+`getCurrentLocation()` supports per-request accuracy targets, timeouts, and automatic Swift `Task` cancellation. Without an accuracy override, it captures the configured `desiredAccuracy` when the request starts. Numeric targets are enforced when accepting fixes; the Best and BestForNavigation modes accept any valid fix:
 
 ```swift
 // Async/Await with Task cancellation
@@ -281,7 +283,7 @@ LocationManager.shared.$authorizationStatus
 
 ### 5. Reverse & Forward Geocoding
 
-Geocoding requests use isolated per-call instances to prevent collision errors:
+Geocoding requests use isolated per-call `CLGeocoder` instances on all supported OS versions to preserve structured street, state, and postal fields. The explicit OS 26 `PlacemarkInfo(from: MKMapItem)` initializer provides display-address data and does not populate those structured fields:
 
 ```swift
 // Reverse Geocoding (Coordinates → Address)

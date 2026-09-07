@@ -216,6 +216,8 @@ public struct PlacemarkInfo: Sendable, Equatable, Hashable {
 
     #if canImport(MapKit)
     #if compiler(>=6.2)
+    /// Converts MapKit display-address data. Structured street, state, and postal fields
+    /// are unavailable here; use the geocoding methods for structured address results.
     @available(iOS 26.0, macOS 26.0, *)
     public init(from mapItem: MKMapItem) {
         let full = mapItem.addressRepresentations?.fullAddress(includingRegion: true, singleLine: true)
@@ -328,6 +330,9 @@ public final class LocationManager: NSObject {
         self.authorizationStatus = Self.mapCLAuthorizationStatus(cl.authorizationStatus)
         self.accuracyAuthorization = Self.mapCLAccuracyAuthorization(cl.accuracyAuthorization)
         super.init()
+        if authorizationStatus == .notDetermined {
+            resetAlwaysAuthorizationRequestTracking()
+        }
         clManager.delegate = self
         clManager.desiredAccuracy = kCLLocationAccuracyBest
         clManager.distanceFilter = kCLDistanceFilterNone
@@ -545,7 +550,7 @@ public final class LocationManager: NSObject {
 
     private struct SingleFetchRequest {
         let id: UUID
-        let desiredAccuracy: CLLocationAccuracy?
+        let desiredAccuracy: CLLocationAccuracy
         let maxAge: TimeInterval
         let completion: @Sendable (Result<CLLocation, LocationError>) -> Void
         let timer: Timer
@@ -554,6 +559,8 @@ public final class LocationManager: NSObject {
     private var activeFetchRequests: [UUID: SingleFetchRequest] = [:]
     private var permissionCompletions: [@Sendable (LocationAuthorizationStatus) -> Void] = []
     private var didBecomeActiveObserver: (any NSObjectProtocol)?
+    private var alwaysRequestID: UUID?
+    private var permissionTimeoutTimer: Timer?
     private let defaultFetchTimeout: TimeInterval = 15
 
     private func updateActiveAccuracy() {
@@ -564,7 +571,7 @@ public final class LocationManager: NSObject {
 
         var bestAccuracy = isContinuousUpdatingActive ? configuredDesiredAccuracy : kCLLocationAccuracyThreeKilometers
         for request in activeFetchRequests.values {
-            let reqAcc = request.desiredAccuracy ?? configuredDesiredAccuracy
+            let reqAcc = request.desiredAccuracy
             bestAccuracy = min(bestAccuracy, reqAcc)
         }
         clManager.desiredAccuracy = bestAccuracy
@@ -580,9 +587,8 @@ public final class LocationManager: NSObject {
         }
     }
 
-    private func location(_ location: CLLocation, satisfiesAccuracy targetAccuracy: CLLocationAccuracy?) -> Bool {
+    private func location(_ location: CLLocation, satisfiesAccuracy targetAccuracy: CLLocationAccuracy) -> Bool {
         guard location.horizontalAccuracy >= 0 else { return false }
-        guard let targetAccuracy else { return true }
         if targetAccuracy < 0 {
             // Negative sentinel values (kCLLocationAccuracyBest = -1, kCLLocationAccuracyBestForNavigation = -2)
             // represent qualitative accuracy modes. Any valid fix is accepted.
@@ -592,7 +598,7 @@ public final class LocationManager: NSObject {
         }
     }
 
-    private func setupLifecycleObserverForAlwaysRequest() {
+    private func setupLifecycleObserverForAlwaysRequest(id: UUID) {
         removeLifecycleObserver()
 
         #if os(iOS)
@@ -607,15 +613,13 @@ public final class LocationManager: NSObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.alwaysRequestID == id else { return }
                 self.removeLifecycleObserver()
                 // If the prompt was dismissed (e.g. user selected "Keep Only While Using"),
                 // CoreLocation does not change authorization status and never calls the delegate.
                 // Allow a brief delay for any potential delegate call, then drain completions.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    if !self.permissionCompletions.isEmpty {
-                        self.drainPermissionCompletions(with: self.currentAuthorizationStatus)
-                    }
+                    self.finishAlwaysAuthorizationRequest(id: id, status: self.currentAuthorizationStatus)
                 }
             }
         }
@@ -628,11 +632,47 @@ public final class LocationManager: NSObject {
         }
     }
 
-    private func drainPermissionCompletions(with status: LocationAuthorizationStatus) {
+    /// Tracks one request generation so delayed callbacks cannot finish a newer prompt.
+    @discardableResult
+    func beginAlwaysAuthorizationRequest(
+        completion: (@Sendable (LocationAuthorizationStatus) -> Void)?,
+        timeout: TimeInterval = 30
+    ) -> UUID {
+        if let completion { permissionCompletions.append(completion) }
+        if let id = alwaysRequestID { return id }
+
+        let id = UUID()
+        alwaysRequestID = id
+        hasRequestedAlwaysAuthorization = true
+        setupLifecycleObserverForAlwaysRequest(id: id)
+        // Allow Once and other ignored requests produce neither a delegate callback
+        // nor a lifecycle transition. Always bound the completion's lifetime.
+        let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.finishAlwaysAuthorizationRequest(id: id, status: self.currentAuthorizationStatus)
+            }
+        }
+        permissionTimeoutTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        return id
+    }
+
+    func finishAlwaysAuthorizationRequest(id: UUID, status: LocationAuthorizationStatus) {
+        guard alwaysRequestID == id else { return }
+        if status == .notDetermined { resetAlwaysAuthorizationRequestTracking() }
+        let pending = takePermissionCompletions()
+        pending.forEach { $0(status) }
+    }
+
+    private func takePermissionCompletions() -> [@Sendable (LocationAuthorizationStatus) -> Void] {
         removeLifecycleObserver()
+        permissionTimeoutTimer?.invalidate()
+        permissionTimeoutTimer = nil
+        alwaysRequestID = nil
         let pending = permissionCompletions
         permissionCompletions.removeAll()
-        pending.forEach { $0(status) }
+        return pending
     }
 }
 
@@ -696,6 +736,8 @@ public extension LocationManager {
     /// Safely handles repeat attempts where Core Location silently ignores duplicate upgrade requests,
     /// checks app active state and Info.plist keys to prevent premature attempt recording,
     /// and observes lifecycle reactivation when the prompt is dismissed.
+    /// Returns the current status after 30 seconds if no response arrives; later
+    /// authorization changes still publish normally. Tracking resets when permission expires.
     func requestAlwaysAuthorization(completion: (@Sendable (LocationAuthorizationStatus) -> Void)? = nil) {
         guard areLocationServicesEnabled else {
             completion?(.denied)
@@ -708,6 +750,13 @@ public extension LocationManager {
             completion?(current)
             return
         }
+
+        // Concurrent callers share the outstanding request, including its deadline.
+        if alwaysRequestID != nil {
+            beginAlwaysAuthorizationRequest(completion: completion)
+            return
+        }
+        if current == .notDetermined { resetAlwaysAuthorizationRequestTracking() }
 
         // If WhenInUse and Always upgrade prompt was already requested once before,
         // CoreLocation will not show the prompt again (no-op). Return immediately.
@@ -728,16 +777,7 @@ public extension LocationManager {
             return
         }
 
-        // Mark that the prompt has been requested
-        hasRequestedAlwaysAuthorization = true
-
-        if let completion {
-            permissionCompletions.append(completion)
-        }
-
-        // Observe app reactivation in case the user declines the upgrade ("Keep Only While Using")
-        // which leaves authorization unchanged without triggering delegate callbacks.
-        setupLifecycleObserverForAlwaysRequest()
+        beginAlwaysAuthorizationRequest(completion: completion)
 
         clManager.requestAlwaysAuthorization()
     }
@@ -916,7 +956,7 @@ public extension LocationManager {
 
         let request = SingleFetchRequest(
             id: id,
-            desiredAccuracy: accuracy,
+            desiredAccuracy: accuracy ?? configuredDesiredAccuracy,
             maxAge: maxAge,
             completion: completion,
             timer: timer
@@ -930,7 +970,7 @@ public extension LocationManager {
     /// Fetches the current location once and returns it via completion.
     /// Multiplexes through location streaming to ensure Core Location API contracts are respected.
     /// - Parameters:
-    ///   - accuracy: Desired accuracy override for this request only
+    ///   - accuracy: Desired accuracy override; defaults to desiredAccuracy at enqueue time
     ///   - timeout: Seconds before this specific request times out
     ///   - maxAge: Maximum acceptable age of the location fix in seconds (defaults to 15s)
     ///   - completion: Called with result on the main actor
@@ -978,7 +1018,7 @@ public extension LocationManager {
         }
         let request = SingleFetchRequest(
             id: id,
-            desiredAccuracy: desiredAccuracy,
+            desiredAccuracy: desiredAccuracy ?? configuredDesiredAccuracy,
             maxAge: maxAge,
             completion: completion,
             timer: timer
@@ -1130,42 +1170,8 @@ public extension LocationManager {
         location: CLLocation,
         completion: @escaping @Sendable (Result<PlacemarkInfo, LocationError>) -> Void
     ) {
-        #if canImport(MapKit)
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, iOS 26.0, *) {
-            if let req = MKReverseGeocodingRequest(location: location) {
-                Task {
-                    do {
-                        let items = try await req.mapItems
-                        guard let item = items.first else {
-                            completion(.failure(.locationUnavailable))
-                            return
-                        }
-                        completion(.success(PlacemarkInfo(from: item)))
-                    } catch {
-                        completion(.failure(.geocodingFailed(error.localizedDescription)))
-                    }
-                }
-            } else {
-                completion(.failure(.locationUnavailable))
-            }
-        } else {
-            performLegacyReverseGeocode(location: location, completion: completion)
-        }
-        #else
-        performLegacyReverseGeocode(location: location, completion: completion)
-        #endif
-        #else
-        performLegacyReverseGeocode(location: location, completion: completion)
-        #endif
-    }
-
-    @available(iOS, introduced: 14.0, deprecated: 26.0, message: "Use MapKit on macOS 26+ / iOS 26+")
-    @available(macOS, introduced: 11.0, deprecated: 26.0, message: "Use MapKit on macOS 26+ / iOS 26+")
-    private func performLegacyReverseGeocode(
-        location: CLLocation,
-        completion: @escaping @Sendable (Result<PlacemarkInfo, LocationError>) -> Void
-    ) {
+        // CLGeocoder preserves structured street/state/postal fields that the
+        // MapKit display-address API does not expose.
         let geocoder = CLGeocoder()
         geocoder.reverseGeocodeLocation(location) { placemarks, error in
             Task { @MainActor in
@@ -1196,39 +1202,8 @@ public extension LocationManager {
         address: String,
         completion: @escaping @Sendable (Result<[PlacemarkInfo], LocationError>) -> Void
     ) {
-        #if canImport(MapKit)
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, iOS 26.0, *) {
-            if let req = MKGeocodingRequest(addressString: address) {
-                Task {
-                    do {
-                        let items = try await req.mapItems
-                        let results = items.map { PlacemarkInfo(from: $0) }
-                        completion(.success(results))
-                    } catch {
-                        completion(.failure(.geocodingFailed(error.localizedDescription)))
-                    }
-                }
-            } else {
-                completion(.failure(.geocodingFailed("Unable to create geocoding request")))
-            }
-        } else {
-            performLegacyForwardGeocode(address: address, completion: completion)
-        }
-        #else
-        performLegacyForwardGeocode(address: address, completion: completion)
-        #endif
-        #else
-        performLegacyForwardGeocode(address: address, completion: completion)
-        #endif
-    }
-
-    @available(iOS, introduced: 14.0, deprecated: 26.0, message: "Use MapKit on macOS 26+ / iOS 26+")
-    @available(macOS, introduced: 11.0, deprecated: 26.0, message: "Use MapKit on macOS 26+ / iOS 26+")
-    private func performLegacyForwardGeocode(
-        address: String,
-        completion: @escaping @Sendable (Result<[PlacemarkInfo], LocationError>) -> Void
-    ) {
+        // CLGeocoder preserves structured street/state/postal fields that the
+        // MapKit display-address API does not expose.
         let geocoder = CLGeocoder()
         geocoder.geocodeAddressString(address) { placemarks, error in
             Task { @MainActor in
@@ -1409,7 +1384,8 @@ extension LocationManager: @preconcurrency CLLocationManagerDelegate {
 
     public func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         // Discard negative horizontal accuracy (invalid coordinates)
-        guard let location = locations.last(where: { $0.horizontalAccuracy >= 0 && CLLocationCoordinate2DIsValid($0.coordinate) }) else {
+        let validLocations = locations.filter { $0.horizontalAccuracy >= 0 && CLLocationCoordinate2DIsValid($0.coordinate) }
+        guard let location = validLocations.last else {
             return
         }
 
@@ -1422,22 +1398,26 @@ extension LocationManager: @preconcurrency CLLocationManagerDelegate {
         }
 
         if !activeFetchRequests.isEmpty {
-            var completedRequests: [SingleFetchRequest] = []
-            for (id, request) in activeFetchRequests {
-                if self.location(location, satisfiesAccuracy: request.desiredAccuracy) && self.isRecent(location, maxAge: request.maxAge) {
+            var completedRequests: [(request: SingleFetchRequest, location: CLLocation)] = []
+            for (_, request) in activeFetchRequests {
+                if let fix = validLocations.last(where: {
+                    self.location($0, satisfiesAccuracy: request.desiredAccuracy) && self.isRecent($0, maxAge: request.maxAge)
+                }) {
                     request.timer.invalidate()
-                    completedRequests.append(request)
-                    activeFetchRequests.removeValue(forKey: id)
+                    completedRequests.append((request, fix))
                 }
             }
 
             if !completedRequests.isEmpty {
+                for completed in completedRequests {
+                    activeFetchRequests.removeValue(forKey: completed.request.id)
+                }
                 updateActiveAccuracy()
                 stopLocationUpdatesIfNeeded()
 
                 // Execute completions safely outside iteration
-                for request in completedRequests {
-                    request.completion(.success(location))
+                for completed in completedRequests {
+                    completed.request.completion(.success(completed.location))
                 }
             }
         }
@@ -1464,6 +1444,14 @@ extension LocationManager: @preconcurrency CLLocationManagerDelegate {
 
             delegate?.locationManager(self, didFailWithError: mappedError)
             _errorPublisher.send(mappedError)
+
+            // Heading and region failures do not invalidate GPS fixes.
+            switch mappedError {
+            case .headingFailure, .regionMonitoringFailed:
+                return
+            default:
+                break
+            }
 
             if !activeFetchRequests.isEmpty {
                 let requests = Array(activeFetchRequests.values)
@@ -1499,15 +1487,26 @@ extension LocationManager: @preconcurrency CLLocationManagerDelegate {
         let authStatus = Self.mapCLAuthorizationStatus(manager.authorizationStatus)
         let accuracyStatus = Self.mapCLAccuracyAuthorization(manager.accuracyAuthorization)
 
+        handleAuthorizationChange(authStatus, accuracyStatus: accuracyStatus)
+    }
+
+    internal func handleAuthorizationChange(
+        _ authStatus: LocationAuthorizationStatus,
+        accuracyStatus: AccuracyAuthorizationStatus
+    ) {
         let authChanged = self.authorizationStatus != authStatus
         let accuracyChanged = self.accuracyAuthorization != accuracyStatus
 
+        // Detach the old generation before @Published or delegate callbacks can
+        // synchronously enqueue a new authorization request.
+        let pending = authChanged ? takePermissionCompletions() : []
+        if authStatus == .notDetermined { resetAlwaysAuthorizationRequestTracking() }
         self.authorizationStatus = authStatus
         self.accuracyAuthorization = accuracyStatus
 
         if authChanged {
             delegate?.locationManager(self, didChangeAuthorizationStatus: authStatus)
-            drainPermissionCompletions(with: authStatus)
+            pending.forEach { $0(authStatus) }
         }
 
         if accuracyChanged {

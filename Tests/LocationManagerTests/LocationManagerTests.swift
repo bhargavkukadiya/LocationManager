@@ -15,6 +15,7 @@ final class LocationManagerTests: XCTestCase {
         try await super.setUp()
         cancellables.removeAll()
         LocationManager.shared.resetAlwaysAuthorizationRequestTracking()
+        LocationManager.shared.desiredAccuracy = kCLLocationAccuracyBest
     }
 
     override func tearDown() async throws {
@@ -22,6 +23,174 @@ final class LocationManagerTests: XCTestCase {
         LocationManager.shared.stopUpdatingLocation()
         try await super.tearDown()
     }
+
+    // MARK: - Review Regression Tests
+
+    private func sample(accuracy: Double, age: TimeInterval = 0) -> CLLocation {
+        CLLocation(coordinate: CLLocationCoordinate2D(latitude: 37, longitude: -122),
+                   altitude: 0, horizontalAccuracy: accuracy, verticalAccuracy: 1,
+                   timestamp: Date().addingTimeInterval(-age))
+    }
+
+    func testSensorErrorsDoNotFailLocationFetch() async {
+        let completed = expectation(description: "GPS survives other sensor failures")
+        let lm = LocationManager.shared
+        let id = lm.queueFetchRequestForTesting(desiredAccuracy: 10) { result in
+            guard case .success(let location) = result else {
+                XCTFail("GPS request failed: \(result)")
+                return
+            }
+            XCTAssertEqual(location.horizontalAccuracy, 5)
+            completed.fulfill()
+        }
+        defer { lm.cancelLocationRequest(id: id) }
+        for code in [CLError.Code.headingFailure, .regionMonitoringFailure] {
+            lm.locationManager(CLLocationManager(), didFailWithError: NSError(domain: kCLErrorDomain, code: code.rawValue))
+        }
+        lm.locationManager(CLLocationManager(), didUpdateLocations: [sample(accuracy: 5)])
+        await fulfillment(of: [completed], timeout: 1)
+    }
+
+    func testFetchSnapshotsConfiguredAccuracy() async {
+        let completed = expectation(description: "Only accurate fix resolves default request")
+        let lm = LocationManager.shared
+        lm.desiredAccuracy = 10
+        let id = lm.queueFetchRequestForTesting { result in
+            guard case .success(let location) = result else {
+                XCTFail("Unexpected result: \(result)")
+                return
+            }
+            XCTAssertEqual(location.horizontalAccuracy, 5)
+            completed.fulfill()
+        }
+        defer { lm.cancelLocationRequest(id: id) }
+        lm.desiredAccuracy = 1000
+        lm.locationManager(CLLocationManager(), didUpdateLocations: [sample(accuracy: 1000)])
+        lm.locationManager(CLLocationManager(), didUpdateLocations: [sample(accuracy: 5)])
+        await fulfillment(of: [completed], timeout: 1)
+    }
+
+    func testBatchResolvesRequestsWithDifferentSamples() async {
+        let precise = expectation(description: "Precise request uses earlier fresh sample")
+        let coarse = expectation(description: "Coarse request uses latest sample")
+        let lm = LocationManager.shared
+        let preciseID = lm.queueFetchRequestForTesting(desiredAccuracy: 10, maxAge: 10) { result in
+            guard case .success(let location) = result else { return XCTFail("\(result)") }
+            XCTAssertEqual(location.horizontalAccuracy, 5)
+            precise.fulfill()
+        }
+        let coarseID = lm.queueFetchRequestForTesting(desiredAccuracy: 100, maxAge: 10) { result in
+            guard case .success(let location) = result else { return XCTFail("\(result)") }
+            XCTAssertEqual(location.horizontalAccuracy, 50)
+            coarse.fulfill()
+        }
+        defer {
+            lm.cancelLocationRequest(id: preciseID)
+            lm.cancelLocationRequest(id: coarseID)
+        }
+        lm.locationManager(CLLocationManager(), didUpdateLocations: [
+            sample(accuracy: 1, age: 100), sample(accuracy: 5, age: 1), sample(accuracy: 50)
+        ])
+        XCTAssertEqual(lm.lastKnownLocation?.horizontalAccuracy, 50)
+        await fulfillment(of: [precise, coarse], timeout: 1)
+    }
+
+    func testIgnoredAlwaysRequestCompletesAtDeadline() async {
+        let completed = expectation(description: "Ignored request completes")
+        let lm = LocationManager.shared
+        let expectedStatus = lm.currentAuthorizationStatus
+        lm.beginAlwaysAuthorizationRequest(completion: { status in
+            XCTAssertEqual(status, expectedStatus)
+            completed.fulfill()
+        }, timeout: 0.01)
+        await fulfillment(of: [completed], timeout: 1)
+    }
+
+    func testExpiredTemporaryAuthorizationResetsUpgradeTracking() {
+        let lm = LocationManager.shared
+        lm.handleAuthorizationChange(.authorizedWhenInUse, accuracyStatus: .fullAccuracy)
+        lm.beginAlwaysAuthorizationRequest(completion: nil)
+        XCTAssertTrue(lm.hasRequestedAlwaysAuthorization)
+        lm.handleAuthorizationChange(.notDetermined, accuracyStatus: .fullAccuracy)
+        XCTAssertFalse(lm.hasRequestedAlwaysAuthorization)
+        lm.handleAuthorizationChange(lm.currentAuthorizationStatus, accuracyStatus: lm.currentAccuracyAuthorization)
+    }
+
+    func testConcurrentAlwaysRequestsShareCompletionAndIgnoreOldDeadline() async {
+        let first = expectation(description: "First caller")
+        let second = expectation(description: "Second caller")
+        let newer = expectation(description: "New request")
+        let lm = LocationManager.shared
+        let oldID = lm.beginAlwaysAuthorizationRequest(completion: { status in
+            XCTAssertEqual(status, .authorizedWhenInUse)
+            first.fulfill()
+        })
+        let sharedID = lm.beginAlwaysAuthorizationRequest(completion: { status in
+            XCTAssertEqual(status, .authorizedWhenInUse)
+            second.fulfill()
+        })
+        XCTAssertEqual(oldID, sharedID)
+        lm.finishAlwaysAuthorizationRequest(id: oldID, status: .authorizedWhenInUse)
+        let newID = lm.beginAlwaysAuthorizationRequest(completion: { status in
+            XCTAssertEqual(status, .authorizedAlways)
+            newer.fulfill()
+        })
+        lm.finishAlwaysAuthorizationRequest(id: oldID, status: .denied)
+        lm.finishAlwaysAuthorizationRequest(id: newID, status: .authorizedAlways)
+        await fulfillment(of: [first, second, newer], timeout: 1)
+    }
+
+    private final class UpgradeDelegate: LocationManagerDelegate {
+        var requestID: UUID?
+        let completion: @Sendable (LocationAuthorizationStatus) -> Void
+        init(completion: @escaping @Sendable (LocationAuthorizationStatus) -> Void) {
+            self.completion = completion
+        }
+        func locationManager(_ manager: LocationManager, didChangeAuthorizationStatus status: LocationAuthorizationStatus) {
+            if status == .authorizedWhenInUse {
+                requestID = manager.beginAlwaysAuthorizationRequest(completion: completion)
+            }
+        }
+    }
+
+    func testAuthorizationDelegateCanEnqueueUpgradeWithoutPrematureCompletion() async {
+        let original = expectation(description: "Original request")
+        let upgraded = expectation(description: "Reentrant upgrade")
+        let lm = LocationManager.shared
+        lm.handleAuthorizationChange(.notDetermined, accuracyStatus: .fullAccuracy)
+        let delegate = UpgradeDelegate { status in
+            XCTAssertEqual(status, .authorizedAlways)
+            upgraded.fulfill()
+        }
+        lm.delegate = delegate
+        defer {
+            lm.delegate = nil
+            lm.handleAuthorizationChange(lm.currentAuthorizationStatus, accuracyStatus: lm.currentAccuracyAuthorization)
+        }
+        lm.beginAlwaysAuthorizationRequest(completion: { status in
+            XCTAssertEqual(status, .authorizedWhenInUse)
+            original.fulfill()
+        })
+        lm.handleAuthorizationChange(.authorizedWhenInUse, accuracyStatus: .fullAccuracy)
+        guard let id = delegate.requestID else { return XCTFail("Upgrade was not queued") }
+        lm.finishAlwaysAuthorizationRequest(id: id, status: .authorizedAlways)
+        await fulfillment(of: [original, upgraded], timeout: 1)
+    }
+
+    #if canImport(MapKit)
+    func testStructuredPlacemarkFieldsArePreserved() {
+        let placemark = MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: 37, longitude: -122),
+                                   addressDictionary: ["Street": "1 Infinite Loop", "City": "Cupertino",
+                                                       "State": "CA", "ZIP": "95014",
+                                                       "Country": "United States", "CountryCode": "US"])
+        let info = PlacemarkInfo(from: placemark)
+        XCTAssertEqual(info.locality, "Cupertino")
+        XCTAssertEqual(info.administrativeArea, "CA")
+        XCTAssertEqual(info.postalCode, "95014")
+        XCTAssertEqual(info.country, "United States")
+        XCTAssertEqual(info.isoCountryCode, "US")
+    }
+    #endif
 
     // MARK: - Distance & Bearing Tests
 
