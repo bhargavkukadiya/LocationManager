@@ -4,7 +4,7 @@
     <strong>A modern, production-ready, thread-safe CoreLocation manager for iOS & macOS.</strong>
   </p>
   <p align="center">
-    <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.7%20%7C%206.0-orange.svg?style=flat-square" alt="Swift 5.7+ | 6.0" /></a>
+    <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-6.0%2B-orange.svg?style=flat-square" alt="Swift 6.0+" /></a>
     <a href="https://developer.apple.com"><img src="https://img.shields.io/badge/Platforms-iOS%2014.0%2B%20%7C%20macOS%2011.0%2B-blue.svg?style=flat-square" alt="iOS 14.0+ | macOS 11.0+" /></a>
     <a href="https://swift.org/package-manager/"><img src="https://img.shields.io/badge/SPM-compatible-brightgreen.svg?style=flat-square" alt="Swift Package Manager" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat-square" alt="MIT License" /></a>
@@ -60,8 +60,10 @@ Working directly with Apple's `CLLocationManager` often requires writing extensi
 |---|---|
 | **iOS** | 14.0+ |
 | **macOS** | 11.0+ |
-| **Swift** | 5.7+ (Swift 6 Strict Concurrency Ready) |
-| **Xcode** | 14.0+ |
+| **Swift** | 6.0+ (Swift 6 language mode, strict concurrency) |
+| **Xcode** | 16.0+ |
+
+> Mac Catalyst is supported through iOS. visionOS, tvOS, and watchOS are not supported and fail at compile time with an explicit error.
 
 ---
 
@@ -111,7 +113,7 @@ Add the appropriate location description keys to your application's `Info.plist`
 </dict>
 ```
 
-> **Note**: For background updates on iOS, enable **Location updates** under *Signing & Capabilities → Background Modes*.
+> **Note**: For background updates on iOS, enable **Location updates** under *Signing & Capabilities → Background Modes*. `enableBackgroundLocationUpdates()` returns `false` and reports an error (instead of letting Core Location raise an exception) when that mode is missing. With When In Use permission, start updates while the app is in the foreground so they continue in the background; with Always permission they can also start in the background.
 
 ---
 
@@ -165,7 +167,9 @@ LocationManager.shared.openAppSettings()
 #endif
 ```
 
-Always requests return the current status after 30 seconds if no response arrives (including requests ignored after Allow Once). Later permission changes still reach the authorization publisher and delegate. Upgrade tracking resets when authorization returns to Not Determined.
+When In Use and Always requests return the current status after 30 seconds if no response arrives (including requests ignored after Allow Once). Concurrent requests share the outstanding prompt. Later permission changes still reach the authorization publisher and delegate. Upgrade tracking resets when authorization returns to Not Determined. If access is revoked, continuous tracking stops and pending one-shot requests fail with `.notAuthorized`.
+
+`areLocationServicesEnabled` returns a cached value that is refreshed off the main thread at launch, whenever the app becomes active, and on every authorization change, so it never blocks the UI. Because disabled Location Services always surface as `.denied`, it never reports disabled while the status is anything else, including inside authorization callbacks right after services are turned back on. Use `await checkLocationServicesEnabled()` when you need a fresh value.
 
 #### Smart Authorization Resolver
 Check what permission level is needed before gating a feature:
@@ -208,7 +212,7 @@ if accuracy == .reducedAccuracy {
 
 ### 3. One-Shot Location Fetching
 
-`getCurrentLocation()` supports per-request accuracy targets, timeouts, and automatic Swift `Task` cancellation. Without an accuracy override, it captures the configured `desiredAccuracy` when the request starts. Numeric targets are enforced when accepting fixes; the Best and BestForNavigation modes accept any valid fix:
+`getCurrentLocation()` supports per-request accuracy targets, timeouts, and automatic Swift `Task` cancellation. Without an accuracy override, it captures the configured `desiredAccuracy` when the request starts. Numeric targets are enforced when accepting fixes; the Best and BestForNavigation modes accept any valid fix, as does any request while the user has granted only approximate location (Reduced Accuracy). A cached fix that already meets the request's accuracy and `maxAge` is returned immediately. Otherwise, in the foreground, updates are (re)started so a fresh fix arrives even during continuous tracking with a `distanceFilter`; in the background, a running session is kept (stopping it would end When In Use background access) and the request waits for that session's next fix or its timeout:
 
 ```swift
 // Async/Await with Task cancellation
@@ -248,7 +252,7 @@ if let requestID {
 ### 4. Streaming Updates (AsyncStream & Combine)
 
 #### Swift Concurrency `AsyncStream`
-Streams use bounded buffers to prevent memory accumulation (`locations` & `headings` buffer the 1 newest item; `visits` buffers the 10 newest items):
+Streams use bounded buffers to prevent memory accumulation (`locations` & `headings` buffer the 1 newest item; `visits` and `regionEvents` buffer the 10 newest items). Automatic pausing is off by default. If you set `pausesAutomatically = true`, observe `locationManagerDidPauseLocationUpdates(_:)` / `locationManagerDidResumeLocationUpdates(_:)` on the delegate; paused updates do not restart on their own, so call `startUpdatingLocation()` to resume. With When In Use permission, a pause in the background ends location access until the app returns to the foreground, and restarting from the background cannot restore it — restart once the app is active again, and keep `pausesAutomatically = false` if you need uninterrupted background tracking:
 
 ```swift
 // Stream locations
@@ -283,15 +287,17 @@ LocationManager.shared.$authorizationStatus
 
 ### 5. Reverse & Forward Geocoding
 
-Geocoding requests use isolated per-call `CLGeocoder` instances on all supported OS versions to preserve structured street, state, and postal fields. The explicit OS 26 `PlacemarkInfo(from: MKMapItem)` initializer provides display-address data and does not populate those structured fields:
+Geocoding requests use isolated per-call `CLGeocoder` instances on all supported OS versions to preserve structured street, state, and postal fields. The explicit OS 26 `PlacemarkInfo(from: MKMapItem)` initializer provides display-address data and does not populate those structured fields.
+
+Async geocoding honors `Task` cancellation (throwing `CancellationError`); callback variants return an ID for `cancelGeocode(id:)`. An address with no match returns an empty array, and a location with no address fails with `.locationUnavailable`; `.geocodingFailed` is reserved for real failures such as network errors:
 
 ```swift
 // Reverse Geocoding (Coordinates → Address)
 let info = try await LocationManager.shared.reverseGeocode(location: location)
 print(info.formattedAddress)
 // "221B Baker Street, London, Greater London, NW1 6XE, United Kingdom"
-print(info.locality)         // "London"
-print(info.country)          // "United Kingdom"
+print(info.locality ?? "")   // "London"
+print(info.country ?? "")    // "United Kingdom"
 
 // Forward Geocoding (Address String → Coordinates)
 let placemarks = try await LocationManager.shared.forwardGeocode(address: "1 Apple Park Way, Cupertino, CA")
@@ -316,6 +322,16 @@ LocationManager.shared.startMonitoringRegion(
 
 // Request immediate state check (.inside / .outside)
 LocationManager.shared.requestRegionState(identifier: "office_geofence")
+
+// Observe entry / exit events (also available via `regionEventPublisher` and the delegate)
+Task {
+    for await event in LocationManager.shared.regionEvents {
+        switch event {
+        case .entered(let region): print("Entered \(region.identifier)")
+        case .exited(let region):  print("Exited \(region.identifier)")
+        }
+    }
+}
 
 // Stop monitoring
 LocationManager.shared.stopMonitoringRegion(identifier: "office_geofence")
@@ -411,6 +427,21 @@ final class LocationTracker: LocationManagerDelegate {
         print("Geofence state: \(state == .inside ? "Inside" : "Outside")")
     }
 
+    // Only called when `pausesAutomatically` is true; paused updates do not restart on their own.
+    // With When In Use permission, a pause in the background ends location access until the app
+    // is back in the foreground, so restart from your foreground handler rather than from here.
+    private var resumeAfterPause = false
+
+    func locationManagerDidPauseLocationUpdates(_ manager: LocationManager) {
+        resumeAfterPause = true
+    }
+
+    func appDidBecomeActive() { // e.g. call when `scenePhase` becomes `.active`
+        guard resumeAfterPause else { return }
+        resumeAfterPause = false
+        LocationManager.shared.startUpdatingLocation()
+    }
+
     #if os(iOS)
     func locationManager(_ manager: LocationManager, didUpdateHeading heading: CLHeading) {
         print("Heading: \(heading.trueHeading)°")
@@ -438,7 +469,7 @@ All errors conform to `LocalizedError`, `Sendable`, and `Equatable`:
 | `.timeout` | One-shot location request timed out |
 | `.cancelled` | Location request was explicitly cancelled |
 | `.regionMonitoringUnavailable` | Region monitoring is not supported on this device |
-| `.regionMonitoringFailed(message)` | Geofence registration failed |
+| `.regionMonitoringFailed(message)` | Geofence registration failed (also delivered to `monitoringDidFailFor` on the delegate) |
 | `.headingFailure(message)` | Magnetometer heading failed |
 | `.unknownError(message)` | Underlying Core Location system error |
 
