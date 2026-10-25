@@ -32,6 +32,7 @@ Working directly with Apple's `CLLocationManager` often requires writing extensi
 ## Table of Contents
 
 - [Requirements](#requirements)
+  - [Upgrading from 1.x](#upgrading-from-1x)
 - [Installation](#installation)
   - [Swift Package Manager](#swift-package-manager-recommended)
   - [Manual Installation](#manual-installation)
@@ -67,9 +68,21 @@ Working directly with Apple's `CLLocationManager` often requires writing extensi
 
 ### Upgrading from 1.x
 
-Version 2.0 requires Swift 6 language mode and Xcode 16 or later. Stay on the 1.x release line if you need the earlier toolchain requirements. The minimum iOS and macOS versions are unchanged.
+**Toolchain.** Version 2.0 requires the Swift 6 compiler (Xcode 16 or later). The package builds its own module in Swift 6 language mode; your app can keep using Swift 5 language mode. The minimum iOS and macOS versions are unchanged. Staying on 1.x does not help with older toolchains: although 1.x advertised Swift 5.7 / Xcode 14, it also needs the Swift 6 compiler, so no release builds with Xcode 15 or earlier.
 
-`areLocationServicesEnabled` now returns a cached, nonblocking result; use `await checkLocationServicesEnabled()` for a fresh check. Automatic pausing is now disabled by default. If you enable it, follow the foreground restart guidance below. The implementation/testing helpers `enqueueFetchRequest` and `queueFetchRequestForTesting` are no longer public; use `getCurrentLocation()` for location requests.
+**API changes.**
+- `enqueueFetchRequest` and `queueFetchRequestForTesting` were implementation/testing helpers and are no longer public; use `getCurrentLocation()`.
+- `areLocationServicesEnabled` now returns a cached, nonblocking result; use `await checkLocationServicesEnabled()` for a fresh check.
+- `reverseGeocode`, `forwardGeocode`, and `enableBackgroundLocationUpdates` now return a value (marked `@discardableResult`, so existing calls compile unchanged).
+
+**Behavior changes to check in existing code.**
+- **Geocoding results:** a forward geocode with no match now succeeds with an empty array (1.x failed with `.geocodingFailed`), and a reverse geocode with no address fails with `.locationUnavailable`. `.geocodingFailed` now means a real failure such as a network error.
+- **Region monitoring failures** now also reach the delegate's `locationManager(_:didFailWithError:)`, not only `locationManager(_:monitoringDidFailFor:withError:)`. A delegate that implements both receives both calls.
+- **`.locationUnknown`** is treated as transient and is no longer reported through `errorPublisher` or the delegate.
+- **Revoked access** (including an expired Allow Once) stops continuous tracking and fails pending one-shot requests with `.notAuthorized`.
+- **One-shot fetches** return a cached fix immediately when it already meets the request's accuracy and `maxAge`, and accept any valid fix while the user has granted only approximate location.
+- **When In Use requests** now return the current status after 30 seconds if no response arrives, matching Always requests.
+- **Automatic pausing** is now disabled by default on iOS (it was already off on macOS). If you enable it, follow the [foreground restart guidance](#4-streaming-updates-asyncstream--combine).
 
 ---
 
