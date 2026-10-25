@@ -65,6 +65,12 @@ Working directly with Apple's `CLLocationManager` often requires writing extensi
 
 > Mac Catalyst is supported through iOS. visionOS, tvOS, and watchOS are not supported and fail at compile time with an explicit error.
 
+### Upgrading from 1.x
+
+Version 2.0 requires Swift 6 language mode and Xcode 16 or later. Stay on the 1.x release line if you need the earlier toolchain requirements. The minimum iOS and macOS versions are unchanged.
+
+`areLocationServicesEnabled` now returns a cached, nonblocking result; use `await checkLocationServicesEnabled()` for a fresh check. Automatic pausing is now disabled by default. If you enable it, follow the foreground restart guidance below. The implementation/testing helpers `enqueueFetchRequest` and `queueFetchRequestForTesting` are no longer public; use `getCurrentLocation()` for location requests.
+
 ---
 
 ## Installation
@@ -78,12 +84,12 @@ Working directly with Apple's `CLLocationManager` often requires writing extensi
    ```
    https://github.com/bhargavkukadiya/LocationManager.git
    ```
-4. Set the **Dependency Rule** to **Up to Next Major Version** with `1.0.1`, then click **Add Package**.
+4. Set the **Dependency Rule** to **Up to Next Major Version** with `2.0.0`, then click **Add Package**.
 
 #### In `Package.swift`:
 ```swift
 dependencies: [
-    .package(url: "https://github.com/bhargavkukadiya/LocationManager.git", from: "1.0.1")
+    .package(url: "https://github.com/bhargavkukadiya/LocationManager.git", from: "2.0.0")
 ]
 ```
 
@@ -288,6 +294,8 @@ LocationManager.shared.$authorizationStatus
 ### 5. Reverse & Forward Geocoding
 
 Geocoding requests use isolated per-call `CLGeocoder` instances on all supported OS versions to preserve structured street, state, and postal fields. The explicit OS 26 `PlacemarkInfo(from: MKMapItem)` initializer provides display-address data and does not populate those structured fields.
+
+The `MKMapItem` initializer additionally requires Xcode 26 / Swift 6.2 or later and iOS 26 / macOS 26 or later. The `CLGeocoder` methods work with the package's minimum toolchain and OS versions.
 
 Async geocoding honors `Task` cancellation (throwing `CancellationError`); callback variants return an ID for `cancelGeocode(id:)`. An address with no match returns an empty array, and a location with no address fails with `.locationUnavailable`; `.geocodingFailed` is reserved for real failures such as network errors:
 
